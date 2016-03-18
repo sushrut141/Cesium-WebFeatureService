@@ -4,11 +4,16 @@ A module which when integrated into cesium loads vector features from a Web Feat
 
 After integration into Cesium the provider is initialised as
 
-    //initialise provider
-    var wfs = new Cesium.WebFeatureServiceImageryProvider({
+    //initialise cesium
+    var viewer = new Cesium.Viewer("cesiumContatiner");
+    
+    //initialise WFS provider
+     var wfs = new Cesium.WebFeatureServiceImageryProvider({
       url : "http://localhost:8080/geoserver/web",
-      layers : "vectorLayerName"
+      layers : "vectorLayerName",
+      scene : viewer.scene
     });
+    
     //to be called to load features
     wfs.GetFeature();
 
