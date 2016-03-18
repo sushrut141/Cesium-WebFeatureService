@@ -4,10 +4,10 @@ A module which when integrated into cesium loads vector features from a Web Feat
 
 After integration into Cesium the provider is initialised as 
 
-var wfs = new Cesium.WebFeatureServiceImageryProvider({
-  url : "http://localhost:8080/geoserver/web",
-  layers : "vectorLayerName"
-});
+    var wfs = new Cesium.WebFeatureServiceImageryProvider({
+      url : "http://localhost:8080/geoserver/web",
+      layers : "vectorLayerName"
+    });
 
 The module loads features by sending a GET request to the server instance and parsing the GML data received t
 get the coordinates.
