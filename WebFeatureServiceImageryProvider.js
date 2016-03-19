@@ -6,6 +6,7 @@ define('Scene/WebFeatureServiceImageryProvider',[
         '../Core/loadXML',
         '../Core/loadText',
         '../Core/DeveloperError',
+        '../Core/Ellipsoid',
         '../Core/Event',
         '../ThirdParty/when',
         './PolylineCollection',
@@ -18,6 +19,7 @@ define('Scene/WebFeatureServiceImageryProvider',[
         loadXML,
         loadText,
         DeveloperError,
+        Ellipsoid,
         Event,
         when,
         PolylineCollection){
@@ -91,6 +93,15 @@ define('Scene/WebFeatureServiceImageryProvider',[
 
 
         function processFeature(that,feature, crsProperties) {
+
+            var featureText = feature.attributes[0].textContent.split(".");
+            var featureID = parseInt(featureText[1]);
+            if(that._featureMap[featureID])
+                return;
+            else
+                that._featureMap[featureID] = feature.attributes[0].textContent;
+
+
             var i, j, geometryHandler, geometryElements = [];
             var crsFunction = defaultCrsFunction;
             var properties = {};
@@ -147,7 +158,7 @@ define('Scene/WebFeatureServiceImageryProvider',[
                 }),
                 show : true
             });
-            that._scene.primitives.add(that._collectionVector[length - 1]); 
+            that._viewer.scene.primitives.add(that._collectionVector[length - 1]); 
         }
 
         function processLineString(that,lineString, properties, crsProperties, index) {
@@ -199,13 +210,20 @@ define('Scene/WebFeatureServiceImageryProvider',[
 
             var sw = new Cesium.Cartesian2(0,height);
     
-            var left = viewer.scene.camera.pickEllipsoid(sw,Cesium.Ellipsoid.WGS84);
-    
+            var left = that._viewer.scene.camera.pickEllipsoid(sw,Ellipsoid.WGS84);
+            if(!left){
+                that._validBoundingBox = false;
+                return;
+            }
+
             var ne = new Cesium.Cartesian2(width,0);
+            var right = that._viewer.scene.camera.pickEllipsoid(ne,Ellipsoid.WGS84);
+             if(!right){
+                that._validBoundingBox = false;
+                return;
+            }
 
-            var right = viewer.scene.camera.pickEllipsoid(ne,Cesium.Ellipsoid.WGS84);
-
-            var elps = Cesium.Ellipsoid.WGS84;
+            var elps = Ellipsoid.WGS84;
 
             var SW = elps.cartesianToCartographic(left);
             var NE = elps.cartesianToCartographic(right);
@@ -215,9 +233,9 @@ define('Scene/WebFeatureServiceImageryProvider',[
 
             that.N_E.lng = Cesium.Math.toDegrees(NE.longitude);
             that.N_E.lat = Cesium.Math.toDegrees(NE.latitude);
-    
-            //console.log(S_W);
-            //console.log(N_E);
+
+            that._validBoundingBox = true;
+
         }  
 
 
@@ -229,10 +247,11 @@ define('Scene/WebFeatureServiceImageryProvider',[
             if(!defined(options.layers))
                 throw DeveloperError('options.layers is required');
 
-            if(!defined(options.scene))
-                throw DeveloperError("Scene is required");
-            else
-                this._scene = options.scene;
+            if(!defined(options.viewer))
+                throw DeveloperError("viewer is required");
+            
+            //cesium viewer widget
+            this._viewer = options.viewer;
 
             //address of server
             this._url = options.url;
@@ -254,16 +273,27 @@ define('Scene/WebFeatureServiceImageryProvider',[
             this._collectionVector = [];
 
             //max number of features to request
-            this._maxFeatures = 300;
+            this._maxFeatures = defaultValue(options.maxFeatures,100);
 
-            //bbox
+            //found valid bounding box
+            this._validBoundingBox = false;
+
+            //bbox south west and north east corners
             this.S_W = {};
             this.N_E = {};
 
+            //feature map of features alrready rendered
+            this._featureMap = [];
+
             this.buildCompleteRequestUrl();
+
+            this.initialize();
+
         };
 
         //var xhr = new XMLHttpRequest();
+        var scratchLastCamera;
+        var scratchCamera;
 
         defineProperties(WebFeatureServiceImageryProvider.prototype,{
 
@@ -353,6 +383,30 @@ define('Scene/WebFeatureServiceImageryProvider',[
         };
 
         /*
+        *   Start requesting and rendering features
+        *   in the current rendering volume
+        */
+        //change equals test to equalsEpsilon to avoid multiple updates for small changes
+        WebFeatureServiceImageryProvider.prototype.initialize = function(){
+            if(!scratchCamera)
+                scratchCamera = this._viewer.scene.camera;
+            if(!scratchLastCamera)
+                scratchLastCamera = scratchCamera.clone();
+            var that = this;
+            this._viewer.clock.onTick.addEventListener(function() {
+                if (!scratchCamera.position.equals(scratchLastCamera.position) ||
+                    !scratchCamera.direction.equals(scratchLastCamera.direction) ||
+                    !scratchCamera.up.equals(scratchLastCamera.up) ||
+                    !scratchCamera.right.equals(scratchLastCamera.right) ||
+                    !scratchCamera.transform.equals(scratchLastCamera.transform) ||
+                    !scratchCamera.frustum.equals(scratchLastCamera.frustum)) {
+                    that.GetFeature();
+                    scratchLastCamera = scratchCamera.clone();
+                }
+            });
+        }
+
+        /*
         *   operations to be supported by WFS spec
         *   logs a string having the XML spec in the console. 
         */
@@ -378,24 +432,23 @@ define('Scene/WebFeatureServiceImageryProvider',[
         };
 
         /*
-        *   Default function to get the 
-        *   feature collection visible in the current viewing
-        *   volume limited by maxFeatures
+        *   Default function to get the entire 
+        *   feature collection in one request
         */
         WebFeatureServiceImageryProvider.prototype.GetFeature = function(){
             compute(this);
-            var request = "request=GetFeature&" + "typeName=" + this._layers;
-            request = this._getUrl + request + "&maxFeatures=" + this._maxFeatures;
-            var bbox = "&bbox=" + this.S_W.lng.toString() + "," + this.S_W.lat.toString() + ",";
-            bbox = bbox + this.N_E.lng.toString() + "," + this.N_E.lat.toString();
-            var that = this;
-            request = request + bbox;
-            //return getResponseFromServer(this, request);
-            when(loadText(request),function(response){
-                that._response = response;
-                console.log(that._response);
-                loadGML(that,that._response);
-            });    
+            if(this._validBoundingBox){
+                var request = "request=GetFeature&" + "typeName=" + this._layers;
+                request = this._getUrl + request + "&maxFeatures=" + this._maxFeatures;
+                var bbox = "&bbox=" + this.S_W.lng.toString() + "," + this.S_W.lat.toString() + ",";
+                bbox = bbox + this.N_E.lng.toString() + "," + this.N_E.lat.toString();
+                var that = this;
+                request = request + bbox;
+                when(loadText(request),function(response){
+                    that._response = response;
+                    loadGML(that,that._response);
+                });   
+            } 
         };
 
         /*
@@ -434,7 +487,6 @@ define('Scene/WebFeatureServiceImageryProvider',[
             var that = this;
            when(loadText(request),function(response){
                 that._response = response;
-                console.log(that._response);
                 loadGML(that,that._response);
             });
         };
