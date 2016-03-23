@@ -1,4 +1,8 @@
-define('Scene/WebFeatureServiceImageryProvider',[ 
+define('Scene/WebFeatureServiceImageryProvider',[
+        '../Core/Math',
+        '../Core/Color',
+        '../Core/PinBuilder',
+        '../Core/Cartographic', 
         '../Core/Cartesian3',
         '../Core/defaultValue',
         '../Core/defined',
@@ -10,8 +14,12 @@ define('Scene/WebFeatureServiceImageryProvider',[
         '../Core/Event',
         '../ThirdParty/when',
         './PolylineCollection',
+        './BillboardCollection'
     ],function(
-
+        Math,
+        Color,
+        PinBuilder,
+        Cartographic,
         Cartesian3,
         defaultValue,
         defined,
@@ -22,7 +30,8 @@ define('Scene/WebFeatureServiceImageryProvider',[
         Ellipsoid,
         Event,
         when,
-        PolylineCollection){
+        PolylineCollection,
+        BillboardCollection){
         "use strict";
 
 
@@ -44,6 +53,8 @@ define('Scene/WebFeatureServiceImageryProvider',[
         };
 
          var geometryPropertyTypes = {
+            Point : processPoint,
+            MultiPoint : processMultiPoint,
             LineString : processLineString,
             MultiLineString : processMultiLineString
         };
@@ -198,6 +209,61 @@ define('Scene/WebFeatureServiceImageryProvider',[
                 }
             }
         }
+
+        function renderPoint(that){
+            var coords = [];
+            for(var i = 0 ; i < that._coords.length/2;i++){
+                var lat = parseFloat(that._coords[2*i]);
+                var lng = parseFloat(that._coords[2*i + 1]);
+                coords.push(lat,lng);
+            }
+
+            var cart = new Cartographic();
+            cart.longitude = Math.toRadians(coords[0]);
+            cart.latitude = Math.toRadians(coords[1]);
+            cart.height = 0;
+
+            var billBoardPosition = Ellipsoid.WGS84.cartographicToCartesian(cart);
+
+            that._collectionVector.push(new BillboardCollection());
+            var length = that._collectionVector.length;
+            var builder = new PinBuilder();
+            var color = new Color(0.0,1.0,1.0);
+            that._collectionVector[length - 1].add({
+                image : builder.fromColor(color,16).toDataURL(),
+                position : billBoardPosition
+            });
+            that._viewer.scene.primitives.add(that._collectionVector[length - 1]);
+        }
+
+
+        function processPoint(that, point, properties, crsProperties) {
+            crsProperties = getCrsProperties(point, crsProperties);
+            var coordString = point.firstElementChild.textContent;
+            var splitCoords = coordString.split(",");
+            var coords_feature = [];
+            that._coords.length = 0;
+            //pushing lat/long values
+            for(var i = 0 ; i < splitCoords.length; i++){
+                that._coords.push(splitCoords[0],splitCoords[1]);
+            }
+            renderPoint(that);
+        }
+
+        function processMultiPoint(that, multiPoint, properties, crsProperties) {
+            crsProperties = getCrsProperties(multiPoint, crsProperties);
+            var pointMembers = multiPoint.getElementsByTagNameNS(gmlns, "pointMember");
+            if(pointMembers.length == 0) {
+                pointMembers = multiPoint.getElementsByTagNameNS(gmlns, "pointMembers");
+            }
+    
+                for(var i = 0; i < pointMembers.length; i++) {
+                    var points = pointMembers[i].children;
+                    for(var j = 0; j < points.length; j++) {
+                        processPoint(that, points[j], properties, crsProperties);
+                    }
+            }
+        }
         /*
         *   options = {
                 url : "http://localhost:8080/geoserver/",
@@ -274,6 +340,9 @@ define('Scene/WebFeatureServiceImageryProvider',[
 
             //max number of features to request
             this._maxFeatures = defaultValue(options.maxFeatures,100);
+
+            //use bounding box
+            this._bboxRequired = defaultValue(options.BBOX,true);
 
             //found valid bounding box
             this._validBoundingBox = false;
@@ -436,19 +505,21 @@ define('Scene/WebFeatureServiceImageryProvider',[
         *   feature collection in one request
         */
         WebFeatureServiceImageryProvider.prototype.GetFeature = function(){
-            compute(this);
-            if(this._validBoundingBox){
-                var request = "request=GetFeature&" + "typeName=" + this._layers;
-                request = this._getUrl + request + "&maxFeatures=" + this._maxFeatures;
+            if(this._bboxRequired)
+                compute(this);
+            var that = this;
+            var request = "request=GetFeature&" + "typeName=" + this._layers;
+            request = this._getUrl + request + "&maxFeatures=" + this._maxFeatures;
+            if(this._bboxRequired && this._validBoundingBox){
                 var bbox = "&bbox=" + this.S_W.lng.toString() + "," + this.S_W.lat.toString() + ",";
                 bbox = bbox + this.N_E.lng.toString() + "," + this.N_E.lat.toString();
-                var that = this;
                 request = request + bbox;
-                when(loadText(request),function(response){
-                    that._response = response;
-                    loadGML(that,that._response);
-                });   
-            } 
+            }
+            when(loadText(request),function(response){
+                that._response = response;
+                loadGML(that,that._response);
+            });   
+        
         };
 
         /*
