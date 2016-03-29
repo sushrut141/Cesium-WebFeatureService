@@ -273,6 +273,9 @@ define('Scene/WebFeatureServiceImageryProvider',[
         */
 
         function compute(that){
+                
+            var width = that._viewer.scene.canvas.width;
+            var height = that._viewer.scene.canvas.height;
 
             var sw = new Cesium.Cartesian2(0,height);
     
