@@ -1,4 +1,6 @@
+
 define('Scene/WebFeatureServiceImageryProvider',[
+        '../Core/PolygonHierarchy',
         '../Core/Math',
         '../Core/Color',
         '../Core/PinBuilder',
@@ -14,8 +16,10 @@ define('Scene/WebFeatureServiceImageryProvider',[
         '../Core/Event',
         '../ThirdParty/when',
         './PolylineCollection',
-        './BillboardCollection'
+        './BillboardCollection',
+        './Polygon'
     ],function(
+        PolygonHierarchy,
         Math,
         Color,
         PinBuilder,
@@ -31,7 +35,8 @@ define('Scene/WebFeatureServiceImageryProvider',[
         Event,
         when,
         PolylineCollection,
-        BillboardCollection){
+        BillboardCollection,
+        Polygon){
         "use strict";
 
 
@@ -56,7 +61,19 @@ define('Scene/WebFeatureServiceImageryProvider',[
             Point : processPoint,
             MultiPoint : processMultiPoint,
             LineString : processLineString,
-            MultiLineString : processMultiLineString
+            MultiLineString : processMultiLineString,
+            Polygon : processPolygon,
+            MultiPolygon : processMultiPolygon,
+        };
+
+        var surfacePropertyTypes = {
+            Polygon : processPolygon,
+            Surface : processSurface
+        };
+
+        var surfaceBoundaryTypes = {
+            LinearRing : processLinearRing,
+            Ring : processRing
         };
 
         var gmlns = "http://www.opengis.net/gml";
@@ -105,13 +122,19 @@ define('Scene/WebFeatureServiceImageryProvider',[
 
         function processFeature(that,feature, crsProperties) {
 
-            var featureText = feature.attributes[0].textContent.split(".");
-            var featureID = parseInt(featureText[1]);
-            if(that._featureMap[featureID])
-                return;
-            else
-                that._featureMap[featureID] = feature.attributes[0].textContent;
-
+            /*
+            when using tiled startegy features need to be rendered again 
+            even if they were previously rendered as they have been removied from the 
+            primitive collection
+            */
+            if(!that._tiled){
+                var featureText = feature.attributes[0].textContent.split(".");
+                var featureID = parseInt(featureText[1]);
+                if(that._featureMap[featureID])
+                    return;
+                else
+                    that._featureMap[featureID] = feature.attributes[0].textContent;
+            }
 
             var i, j, geometryHandler, geometryElements = [];
             var crsFunction = defaultCrsFunction;
@@ -264,6 +287,112 @@ define('Scene/WebFeatureServiceImageryProvider',[
                     }
             }
         }
+
+        function createPolygon(that, hierarchy, properties) {
+            var polygon = new Polygon({
+                polygonHierarchy: hierarchy
+            });
+            polygon.material.uniforms.color = {
+                red: Math.nextRandomNumber(),
+                green: Math.nextRandomNumber(),
+                blue: Math.nextRandomNumber(),
+                alpha: 1.0
+            };
+            
+            that._viewer.scene.primitives.add(polygon);
+        }
+
+        function processPolygon(that, polygon, properties, crsProperties) {
+            crsProperties = getCrsProperties(polygon, crsProperties);
+            var exterior = polygon.getElementsByTagNameNS(gmlns, "outerBoundaryIs");
+            var interior = polygon.getElementsByTagNameNS(gmlns, "innerBoundaryIs");
+    
+            var surfaceBoundary;
+            if(exterior.length == 0 && interior.length == 0) {
+                surfaceBoundary = polygon.firstElementChild;
+                surfaceBoundaryHandler = surfaceBoundaryTypes[surfaceBoundary.localName];
+            }
+
+            var holes = [], surfaceBoundaryHandler, surfaceBoundary, coordinates;
+            for(var i = 0; i < interior.length; i++) {
+                surfaceBoundary = interior[i].firstElementChild;
+                surfaceBoundaryHandler = surfaceBoundaryTypes[surfaceBoundary.localName];
+                holes.push(surfaceBoundaryHandler(surfaceBoundary, [], crsProperties));
+            }
+
+            if(exterior.length == 1) {
+                exterior = exterior[0];
+            }
+            var surfaceBoundary = exterior.firstElementChild;
+            surfaceBoundaryHandler = surfaceBoundaryTypes[surfaceBoundary.localName];
+            that._hierarchy = surfaceBoundaryHandler(that, surfaceBoundary, holes, crsProperties);
+            createPolygon(that, that._hierarchy, properties);
+        }
+
+        function processMultiPolygon(that, multiPolygon, properties, crsProperties) {
+            crsProperties = getCrsProperties(multiPolygon, crsProperties);
+            var polygonMembers = multiPolygon.getElementsByTagNameNS(gmlns, "polygonMember");
+            if(polygonMembers.length == 0) {
+                polygonMembers = multiPolygon.getElementsByTagNameNS(gmlns, "polygonMembers");
+            }
+            for(var i = 0; i < polygonMembers.length; i++) {
+                var polygons = polygonMembers[i].children;
+                for(var j = 0; j < polygons.length; j++) {
+                    processPolygon(that, polygons[j], properties, crsProperties);
+                }
+            }
+        }
+
+        function processCoordinates(that,coordString) {
+            var splitString = coordString.split(" ");
+            var coordinates = [];
+            for(var i = 0 ; i < splitString.length;i++){
+                var coords = splitString[i].split(",");
+                coordinates.push(coords[0],coords[1]);
+            }
+            return coordinates;
+        }   
+
+        function processLinearRing(that,linearRing, holes, crsProperties) {
+            var coordString = linearRing.firstElementChild.textContent;
+            var coords = processCoordinates(that,coordString);
+            var ll_coords = [];
+            for(var i = 0 ; i < coords.length; i++ ){
+                ll_coords.push(parseFloat(coords[i]));
+            }
+            that._coords = Cartesian3.fromDegreesArray(ll_coords);
+
+            var hierarchy = new PolygonHierarchy(that._coords, holes);
+            return hierarchy;
+        }
+
+        //processRing works with only LineStringSegment. Does not work with Arc,
+        //CircleByCenterPoint and Circle. However, its very rare to find Arc,
+        //CircleByCenterPoint and Circle as part of a polygon boundary.
+        function processRing(ring, holes, crsProperties) {
+            var curveMember = ring.firstElementChild.firstElementChild;
+            var segments = curveMember.firstElementChild.children;
+            var coordinates = [];
+            for(i = 0; i < segments.length; i++) {
+                if(segmengts[i].localName === "LineStringSegment") {
+                    var coordString = segments[i].firstElementChild;
+                    coordinates.concat(processCoordinates(coordString));
+                } else {
+                    //Raise error.
+                }
+            }
+            var hierarchy = new PolygonHierarchy(coordinates, holes);
+            return hierarchy;
+        }
+
+        function processSurface(that, surface, properties, crsProperties) {
+            crsProperties = getCrsProperties(surface, crsProperties);
+            var patches = surface.firstElementChild.children;
+            for(i = 0; i < patches.length; i++) {
+                processPolygon(that, patches[i], properties, crsProperties);
+            }
+        }
+
         /*
         *   options = {
                 url : "http://localhost:8080/geoserver/",
@@ -273,10 +402,9 @@ define('Scene/WebFeatureServiceImageryProvider',[
         */
 
         function compute(that){
-                
+
             var width = that._viewer.scene.canvas.width;
             var height = that._viewer.scene.canvas.height;
-
             var sw = new Cesium.Cartesian2(0,height);
     
             var left = that._viewer.scene.camera.pickEllipsoid(sw,Ellipsoid.WGS84);
@@ -337,6 +465,9 @@ define('Scene/WebFeatureServiceImageryProvider',[
             //vector of coords obtained by parsing GML object
             this._coords = [];
 
+            //hierarchy of polygons
+            this._hierarchy = undefined;
+
             //vector of PolylineCollections 
             //used to render linestrings
             this._collectionVector = [];
@@ -356,6 +487,9 @@ define('Scene/WebFeatureServiceImageryProvider',[
 
             //feature map of features alrready rendered
             this._featureMap = [];
+
+            //only render features in current tile
+            this._tiled = defaultValue(options.tiled,false);
 
             this.buildCompleteRequestUrl();
 
@@ -387,7 +521,7 @@ define('Scene/WebFeatureServiceImageryProvider',[
                 }
             },
 
-            url : {
+            new_url : {
                 get : function(){
                     return this._getUrl;
                 }
@@ -460,6 +594,7 @@ define('Scene/WebFeatureServiceImageryProvider',[
         */
         //change equals test to equalsEpsilon to avoid multiple updates for small changes
         WebFeatureServiceImageryProvider.prototype.initialize = function(){
+            Math.setRandomNumberSeed(2);
             if(!scratchCamera)
                 scratchCamera = this._viewer.scene.camera;
             if(!scratchLastCamera)
@@ -518,11 +653,28 @@ define('Scene/WebFeatureServiceImageryProvider',[
                 bbox = bbox + this.N_E.lng.toString() + "," + this.N_E.lat.toString();
                 request = request + bbox;
             }
+            if(this._tiled){
+                this.clearCollection();
+            }
             when(loadText(request),function(response){
                 that._response = response;
                 loadGML(that,that._response);
             });   
         
+        };
+
+        /*
+        * delete all renedered primitives
+        */
+        WebFeatureServiceImageryProvider.prototype.clearCollection = function(){
+            if(this._collectionVector.length === 0){
+                return;
+            } else {
+                var primitives = this._viewer.scene.primitives;
+                for(var i = 0 ; i < this._collectionVector.length; i++){
+                    primitives.remove(this._collectionVector[i]);
+                }
+            }
         };
 
         /*
